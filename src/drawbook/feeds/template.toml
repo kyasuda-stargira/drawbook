@@ -1,0 +1,52 @@
+# Drawbook feed mapping: starter template (not any vendor's format).
+# Copy this file, then rename each `header` to the column name your system's import template uses,
+# and fill `lookup` with your system's transaction codes. Format notes: see drawbook/feeds.py.
+# Why no vendor files ship (2026-11-21): docs/feeds-research.md.
+
+date_format = "%Y-%m-%d"
+
+[[columns]]
+header = "Date"
+field = ["due_date", "notice_date"]
+
+[[columns]]
+header = "Fund"
+field = "fund_name"
+
+[[columns]]
+header = "Investor ID"
+field = "lp_id"
+
+[[columns]]
+header = "Type"
+field = "transaction_type"
+default = "OTHER"
+
+[columns.lookup]
+"Capital Call: Investments" = "CALL"
+"Capital Call: Management Fees" = "CALL_FEE"
+"Capital Call: Partnership Expenses" = "CALL_EXPENSE"
+"Distribution: Return of Capital - Cash" = "DIST_ROC"
+"Distribution: Realized Gain / (Loss) - Cash (input negative value for loss)" = "DIST_GAIN"
+"Distribution: Income" = "DIST_INCOME"
+
+[[columns]]
+header = "Amount"
+field = "lp_amount"
+negate = "outflows"   # capital calls negative, distributions positive
+
+[[columns]]
+header = "Currency"
+field = "fund_currency"
+
+[[columns]]
+header = "Description"
+field = "description"
+
+[[columns]]
+header = "Source"
+field = "source_file"
+
+[[columns]]
+header = "Page"
+field = "page"

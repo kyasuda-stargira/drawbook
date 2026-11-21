@@ -62,6 +62,46 @@ Before each document is sent, Drawbook shows a warning and asks you to confirm. 
 
 **Always confirm changed payment details with the GP by phone before you pay.**
 
+## Getting the documents in
+
+You can drop PDFs into the folder yourself, or let Drawbook collect them. All three routes run on your machine.
+
+**Straight from your GP, through the Drawbook relay.** Your GP sends each notice encrypted to your own devices and signed with the GP's key. Stargira runs the relay but cannot read the notices.
+
+```bash
+drawbook connect init --label "Example Pension Scheme"
+drawbook connect invite "Example Growth Fund I" --gp-email ir@example-capital.com
+drawbook fetch ./my-fund-notices
+```
+
+`invite` prints an email you send to your GP yourself. `drawbook connect hold "<fund>"` tells GPs, by fund name only, that an investor wants that fund's notices through Drawbook. A team shares one account: run `drawbook connect join` on a new device and `drawbook connect approve` on one already connected. The first notice from a GP pins its signing key. Check the fingerprint with the GP by phone. If the key ever changes, Drawbook stops opening that GP's notices until you confirm the new one (`drawbook connect pin`). GPs: see `docs/gp-api.md`.
+
+**From email.** Drawbook reads an IMAP mailbox (read-only, nothing marked as read) or a folder of saved `.eml` / Apple Mail `.emlx` files, and keeps only PDF and Excel attachments from notice emails:
+
+```bash
+drawbook collect inbox ./my-fund-notices --imap-host imap.example.com --imap-user me@example.com --sender example-capital.com
+```
+
+The password comes from the macOS Keychain (`--keychain-service`) or `$DRAWBOOK_IMAP_PASSWORD`, never from the command line.
+
+**From GP portals.** `pip install "drawbook-lp[portal]"`, then describe the portal's login page and document list in a small config file (example in `docs/portals.md`):
+
+```bash
+drawbook collect portal mygp.toml ./my-fund-notices
+```
+
+It logs in with your own username, takes the password from the Keychain, and asks you to type any two-step code. Many portals' terms of use forbid automated logins: check the portal's terms first. You run it at your own risk.
+
+Every route skips documents it has already collected.
+
+## After reading
+
+- **Documents sheet:** for each fund, quarters with no capital account statement and calls with nothing after their due date, marked missing or late. Add `expected.toml` to the folder to list what each fund should send (`docs/expected.md`).
+- **Review:** `drawbook review ./my-fund-notices` walks the Warnings one by one. You accept a figure, correct it or mark it "asked GP". Decisions apply on the next run and show in Warnings as "corrected by reviewer".
+- **Filing:** `--file-to ./filed` copies each document to `<fund>/<date>-<kind>.pdf`. Originals are never moved.
+- **Reporting currency:** `--reporting-currency GBP --fx-rates rates.csv` adds converted amounts using your own rates (date,from,to,rate). Nothing is fetched. A missing rate becomes a warning, not a guess.
+- **Feeds:** `--feed mapping.toml` writes a CSV in another system's import layout. See `docs/feeds.md`.
+
 ## Accuracy
 
 Drawbook is tested on made-up notices in varied GP layouts, because real notices are confidential. With Qwen3 8B (4-bit) running locally, it read 98.0% of fields exactly (348 of 355) on 10 notices in three layouts it had never seen. Scanned copies scored within 5 points of their text versions.

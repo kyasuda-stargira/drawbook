@@ -1,4 +1,4 @@
-"""Write lp-ledger.xlsx (Fund, Transactions, Balances, Warnings) and lp-ledger.csv (transactions)."""
+"""Write lp-ledger.xlsx (Fund, Transactions, Balances, Warnings[, Documents]) and lp-ledger.csv (transactions)."""
 from __future__ import annotations
 
 import csv
@@ -9,7 +9,9 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font
 
+from . import fx
 from .schema import Notice
+from .tracker import DOC_COLS
 
 FUND_COLS = ["fund_name", "gp_name", "fund_currency", "fund_size", "gp_commitment", "lp_id", "lp_name",
              "lp_commitment", "lp_pct_of_fund"]
@@ -49,7 +51,10 @@ def tx_rows(notices: list[Notice]) -> list[dict]:
     return rows
 
 
-def write(notices: list[Notice], warnings: list[dict], out_dir: Path) -> tuple[Path, Path]:
+def write(notices: list[Notice], warnings: list[dict], out_dir: Path, documents_rows: list[dict] | None = None,
+          reporting_currency: str | None = None, rates=None) -> tuple[Path, Path]:
+    """documents_rows (from tracker.documents) adds a Documents sheet. reporting_currency with rates
+    (from fx.load_rates) appends fx.FX_COLS to Transactions and the csv; a missing rate goes to Warnings."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     wb = Workbook()
@@ -76,7 +81,11 @@ def write(notices: list[Notice], warnings: list[dict], out_dir: Path) -> tuple[P
     sheet(ws, FUND_COLS + ["from_file"], funds)
 
     trows = tx_rows(notices)
-    sheet(wb.create_sheet("Transactions"), TX_COLS, [[r[c] for c in TX_COLS] for r in trows])
+    cols = TX_COLS
+    if reporting_currency:
+        warnings = warnings + fx.add_reporting(trows, notices, rates or [], reporting_currency)
+        cols = TX_COLS + fx.FX_COLS
+    sheet(wb.create_sheet("Transactions"), cols, [[r[c] for c in cols] for r in trows])
 
     brows = []
     for n in sorted(notices, key=lambda n: (n.fund_name, n.notice_date or date.min)):
@@ -87,12 +96,14 @@ def write(notices: list[Notice], warnings: list[dict], out_dir: Path) -> tuple[P
 
     sheet(wb.create_sheet("Warnings"), ["file", "field", "warning"],
           [[w["file"], w["field"], w["warning"]] for w in warnings])
+    if documents_rows is not None:
+        sheet(wb.create_sheet("Documents"), DOC_COLS, [[r[c] for c in DOC_COLS] for r in documents_rows])
 
     xlsx = out_dir / "lp-ledger.xlsx"
     wb.save(xlsx)
     csv_path = out_dir / "lp-ledger.csv"
     with csv_path.open("w", newline="") as f:
-        wr = csv.DictWriter(f, fieldnames=TX_COLS)
+        wr = csv.DictWriter(f, fieldnames=cols)
         wr.writeheader()
         for r in trows:
             wr.writerow({k: _v(v) for k, v in r.items()})
