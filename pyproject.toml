@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling==1.27.0"]  # writes metadata 2.4, which twine and PyPI accept
+build-backend = "hatchling.build"
+
+[project]
+name = "drawbook-lp"
+version = "0.1.0"
+description = "Capital call and distribution PDFs to an ILPA-format ledger, every figure linked to its page."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "Stargira" }]
+dependencies = ["pdfplumber>=0.11", "pydantic>=2.6", "openpyxl>=3.1"]
+classifiers = ["Programming Language :: Python :: 3", "Topic :: Office/Business :: Financial :: Accounting"]
+
+[project.scripts]
+drawbook = "drawbook.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/drawbook"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/drawbook", "README.md", "LICENSE", "NOTICE", "pyproject.toml"]
+
+[project.urls]
+Homepage = "https://github.com/kyasuda-stargira/drawbook"
+Source = "https://github.com/kyasuda-stargira/drawbook"

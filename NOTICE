@@ -1,0 +1,12 @@
+Drawbook
+Copyright 2026 Stargira Advisors Ltd
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The ledger layout, section names and transaction types follow the ILPA Capital Call &
+Distribution Template (v. 2.0, September 2025), published by the Institutional Limited
+Partners Association (ilpa.org). ILPA's files are not included in this repository;
+tools/fetch_ilpa.py downloads them from ilpa.org for the tests that need them.
+Drawbook is not affiliated with or endorsed by ILPA.
+
+All notices, funds, investors and bank details in testset/ and sample/ are made up.
