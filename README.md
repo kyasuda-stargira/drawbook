@@ -74,7 +74,7 @@ drawbook connect invite "Example Growth Fund I" --gp-email ir@example-capital.co
 drawbook fetch ./my-fund-notices
 ```
 
-`invite` prints an email you send to your GP yourself. `drawbook connect hold "<fund>"` tells GPs, by fund name only, that an investor wants that fund's notices through Drawbook. A team shares one account: run `drawbook connect join` on a new device and `drawbook connect approve` on one already connected. The first notice from a GP pins its signing key. Check the fingerprint with the GP by phone. If the key ever changes, Drawbook stops opening that GP's notices until you confirm the new one (`drawbook connect pin`). GPs: see `docs/gp-api.md`.
+`invite` prints an email you send to your GP yourself. `drawbook connect hold "<fund>"` tells GPs, by fund name only, that an investor wants that fund's notices through Drawbook. A team shares one account: run `drawbook connect join` on a new device and `drawbook connect approve` on one already connected. The first notice from a GP pins its signing key. Check the fingerprint with the GP by phone. If the key ever changes, Drawbook stops opening that GP's notices until you confirm the new one (`drawbook connect pin`). `drawbook connect delete` deletes your account on the relay, with every device, link and notice not yet fetched; documents already on your computer stay. GPs: see `docs/gp-api.md`.
 
 **From email.** Drawbook reads an IMAP mailbox (read-only, nothing marked as read) or a folder of saved `.eml` / Apple Mail `.emlx` files, and keeps only PDF and Excel attachments from notice emails:
 

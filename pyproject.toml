@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "drawbook-lp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Capital call and distribution PDFs to an ILPA-format ledger, every figure linked to its page."
 readme = "README.md"
 license = "Apache-2.0"

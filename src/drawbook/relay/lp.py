@@ -130,6 +130,16 @@ def pin(gp_id: str, sign_pk: str) -> None:
     _write("pins.json", pins)
 
 
+def delete_account() -> str:
+    """Delete this investor's account on the relay, with every device, link, invite and waiting notice.
+    Then remove this device's relay key and token. Documents already saved are not touched."""
+    c = _read("config.json")
+    relay().call("DELETE", "/v1/lp/account", {"confirm": c["account_id"]})
+    for name in ("config.json", "keys.json"):
+        (home() / name).unlink(missing_ok=True)
+    return c["account_id"]
+
+
 def _safe(name: str) -> str:
     base = os.path.basename(name.replace("\\", "/")) or "notice"
     return "".join(ch if ch.isalnum() or ch in "-_. " else "_" for ch in base).strip(". ") or "notice"

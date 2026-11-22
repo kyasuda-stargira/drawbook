@@ -73,6 +73,16 @@ class GPClient:
     def fingerprint(self) -> str:
         return fingerprint(b64(bytes(self.signer.verify_key)))
 
+    def delete_account(self) -> str:
+        """Delete this firm on the relay, with its funds, investor links and notices not yet fetched.
+        Then remove gp.json (API key and signing key) from this computer."""
+        gp_id = self.state["gp_id"]
+        self.relay.call("DELETE", "/v1/gp/me", {"confirm": gp_id})
+        p = home() / "gp.json"
+        if p.exists() and json.loads(p.read_text()).get("gp_id") == gp_id:
+            p.unlink()
+        return gp_id
+
     # --- profile (shared with Conduit only with consent) ---
     def update_profile(self, profile: dict | None = None, conduit_consent: bool | None = None) -> dict:
         body = {}
@@ -158,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("link_id"); s.add_argument("files", nargs="+", type=Path); s.add_argument("--kind", default="capital_call", choices=KINDS)
     sub.add_parser("rotate-key", help="replace your signing key (investors must re-confirm it)")
     sub.add_parser("whoami")
+    sub.add_parser("delete", help="delete your firm on the relay, with all funds, investor links and unfetched notices")
     a = ap.parse_args(argv)
 
     if a.cmd == "signup":
@@ -191,6 +202,15 @@ def main(argv: list[str] | None = None) -> int:
         print(c.send(a.link_id, a.files, a.kind))
     elif a.cmd == "rotate-key":
         print(f"New fingerprint: {c.rotate_key()}. Tell your investors before your next notice.")
+    elif a.cmd == "delete":
+        print("This deletes your firm on the relay: its profile, all funds, every link to your investors and "
+              "notices they have not yet fetched. It cannot be undone. Your investors can no longer receive notices "
+              "from you through Drawbook. Stargira stops sharing your profile with Conduit; to remove a listing "
+              "already shown in the Conduit directory, contact Stargira through stargira.com.")
+        if input("Type delete to confirm: ").strip() != "delete":
+            print("Nothing deleted.")
+            return 1
+        print(f"Firm {c.delete_account()} deleted.")
     elif a.cmd == "whoami":
         print(f"{c.state['gp_id']}  fingerprint {c.fingerprint()}  relay {c.state['relay']}")
     return 0

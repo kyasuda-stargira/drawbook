@@ -9,6 +9,7 @@ import socket
 import subprocess
 import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -20,6 +21,7 @@ from drawbook.relay.gp import GPClient
 from conftest import ROOT
 
 RELAY_DIR = ROOT / "relay"
+DB = {}  # persist folder of the local relay database, for tests that read or backdate rows
 
 
 @pytest.fixture(scope="module")
@@ -27,6 +29,7 @@ def relay_url(tmp_path_factory):
     if not shutil.which("npx"):
         pytest.skip("npx not installed")
     persist = tmp_path_factory.mktemp("relaydb")
+    DB["persist"] = persist
     env = {**os.environ, "WRANGLER_SEND_METRICS": "false"}
     subprocess.run(["npx", "wrangler", "d1", "migrations", "apply", "drawbook-relay", "--local", "--persist-to", str(persist)],
                    cwd=RELAY_DIR, env=env, check=True, capture_output=True)
@@ -34,7 +37,7 @@ def relay_url(tmp_path_factory):
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     p = subprocess.Popen(["npx", "wrangler", "dev", "--local", "--ip", "127.0.0.1", "--port", str(port), "--persist-to", str(persist),
-                          "--var", "DEV_RETURN_CODE:1", "--var", "ADMIN_TOKEN:test-admin"],
+                          "--var", "DEV_RETURN_CODE:1", "--var", "ADMIN_TOKEN:test-admin", "--test-scheduled"],
                          cwd=RELAY_DIR, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     url = f"http://127.0.0.1:{port}"
     for _ in range(120):
@@ -183,3 +186,143 @@ def test_large_notice_round_trip(relay_url, tmp_path, monkeypatch):
     g.send(link, [big], "capital_account_statement")
     saved, _ = lp.fetch(tmp_path / "in")
     assert open(saved[0]["file"], "rb").read() == big.read_bytes()
+
+
+def sql(command):
+    out = subprocess.run(["npx", "wrangler", "d1", "execute", "drawbook-relay", "--local", "--persist-to", str(DB["persist"]),
+                          "--command", command, "--json"], cwd=RELAY_DIR, check=True, capture_output=True, text=True,
+                         env={**os.environ, "WRANGLER_SEND_METRICS": "false"})
+    return json.loads(out.stdout)[0]["results"]
+
+
+def test_idle_accounts_deleted(relay_url, tmp_path, monkeypatch):
+    # Two GPs and two LPs, all linked with a notice waiting. One GP and one LP then go idle.
+    monkeypatch.setenv("DRAWBOOK_GP_HOME", str(tmp_path / "gp"))
+    gps = {}
+    for name in ("Idlegp", "Busygp"):
+        s = GPClient.signup(relay_url, name, f"ir@{name.lower()}.example", f"{name.lower()}.example")
+        g = GPClient.verify(relay_url, s["signup_id"], s["dev_code"], save=False)
+        gps[name] = (g, g.add_fund(f"{name} Fund I"))
+    lps = {}
+    for name in ("Idle LP", "Busy LP"):
+        use_home(monkeypatch, tmp_path / name)
+        lps[name] = lp.init(relay_url, name)["account_id"]
+        lp.hold("Idlegp Fund I")
+        for g, fund in gps.values():
+            link = g.accept_invite(lp.invite(g.funds()[0]["name"])["code"], fund)
+            pdf = tmp_path / "n.pdf"
+            pdf.write_bytes(b"%PDF-1.4 notice")
+            g.send(link, [pdf])
+    gp_ids = {n: g.relay.call("GET", "/v1/gp/me")["gp_id"] for n, (g, _) in gps.items()}
+
+    # Any signed-in request records activity.
+    sql(f"UPDATE lp_accounts SET last_seen_at = '2000-01-01T00:00:00Z' WHERE id = '{lps['Busy LP']}'")
+    use_home(monkeypatch, tmp_path / "Busy LP")
+    lp.links()
+    assert sql(f"SELECT last_seen_at FROM lp_accounts WHERE id = '{lps['Busy LP']}'")[0]["last_seen_at"] > "2026"
+
+    # Idle for just over 24 months: deleted with everything attached. Just under: kept.
+    old = (datetime.now(timezone.utc) - timedelta(days=731)).isoformat()
+    recent = (datetime.now(timezone.utc) - timedelta(days=729)).isoformat()
+    sql(f"UPDATE lp_accounts SET last_seen_at = '{old}' WHERE id = '{lps['Idle LP']}'")
+    sql(f"UPDATE gp_firms SET last_seen_at = '{old}' WHERE id = '{gp_ids['Idlegp']}'")
+    sql(f"UPDATE gp_firms SET last_seen_at = '{recent}' WHERE id = '{gp_ids['Busygp']}'")
+    urllib.request.urlopen(relay_url + "/__scheduled?cron=17+3+*+*+*", timeout=30).read()
+
+    ids = lambda t: {r["id"] for r in sql(f"SELECT id FROM {t}")}
+    assert lps["Idle LP"] not in ids("lp_accounts") and lps["Busy LP"] in ids("lp_accounts")
+    assert gp_ids["Idlegp"] not in ids("gp_firms") and gp_ids["Busygp"] in ids("gp_firms")
+    for t, col in [("lp_members", "account_id"), ("links", "account_id"), ("invites", "account_id"), ("lp_holdings", "account_id")]:
+        assert sql(f"SELECT COUNT(*) AS n FROM {t} WHERE {col} = '{lps['Idle LP']}'")[0]["n"] == 0
+    assert sql(f"SELECT COUNT(*) AS n FROM links WHERE gp_id = '{gp_ids['Idlegp']}'")[0]["n"] == 0
+    assert sql(f"SELECT COUNT(*) AS n FROM gp_funds WHERE gp_id = '{gp_ids['Idlegp']}'")[0]["n"] == 0
+    # Only the busy pair's link and notice are left, and no orphaned notice content.
+    assert len(sql("SELECT id FROM links")) >= 1
+    assert sql("SELECT COUNT(*) AS n FROM notices WHERE link_id NOT IN (SELECT id FROM links)")[0]["n"] == 0
+    assert sql("SELECT COUNT(*) AS n FROM notice_keys WHERE notice_id NOT IN (SELECT id FROM notices)")[0]["n"] == 0
+    assert sql("SELECT COUNT(*) AS n FROM blob_chunks WHERE notice_id NOT IN (SELECT id FROM notices)")[0]["n"] == 0
+    # The busy GP still works and sees only its link to the busy LP.
+    assert [l["lp_label"] for l in gps["Busygp"][0].links()] == ["Busy LP"]
+
+
+def test_lp_deletes_own_account(relay_url, tmp_path, monkeypatch):
+    from drawbook.cli import cmd_connect
+    monkeypatch.setenv("DRAWBOOK_GP_HOME", str(tmp_path / "gp"))
+    s = GPClient.signup(relay_url, "Leaver Capital", "ir@leaver.example", "leaver.example")
+    g = GPClient.verify(relay_url, s["signup_id"], s["dev_code"], save=False)
+    fund = g.add_fund("Leaver Fund I")
+    a_home, b_home = tmp_path / "a", tmp_path / "b"
+    use_home(monkeypatch, a_home)
+    acct = lp.init(relay_url, "Leaving LP")["account_id"]
+    lp.hold("Leaver Fund I")
+    link = g.accept_invite(lp.invite("Leaver Fund I")["code"], fund)
+    lp.invite("Some Other Fund")  # an unused invite
+    use_home(monkeypatch, b_home)
+    req = lp.join_request("second laptop")
+    use_home(monkeypatch, a_home)
+    grant = lp.approve(req)
+    use_home(monkeypatch, b_home)
+    lp.join(grant)
+    pdf = tmp_path / "n.pdf"
+    pdf.write_bytes(b"%PDF-1.4 waiting notice")
+    g.send(link, [pdf])
+    b_token = json.load(open(b_home / "config.json"))["token"]
+
+    # The relay refuses without the account id repeated; the command refuses without "delete" typed.
+    with pytest.raises(RelayError) as e:
+        lp.relay().call("DELETE", "/v1/lp/account", {"confirm": "wrong"})
+    assert e.value.status == 400
+    use_home(monkeypatch, a_home)
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+    assert cmd_connect(["delete"]) == 1 and (a_home / "config.json").exists()
+
+    monkeypatch.setattr("builtins.input", lambda _: "delete")
+    assert cmd_connect(["delete"]) == 0
+    assert not (a_home / "config.json").exists() and not (a_home / "keys.json").exists()
+    for t in ("lp_accounts", "lp_members", "lp_holdings", "invites", "links"):
+        col = "id" if t == "lp_accounts" else "account_id"
+        assert sql(f"SELECT COUNT(*) AS n FROM {t} WHERE {col} = '{acct}'")[0]["n"] == 0
+    assert sql(f"SELECT COUNT(*) AS n FROM notices WHERE link_id = '{link}'")[0]["n"] == 0
+    assert sql("SELECT COUNT(*) AS n FROM blob_chunks WHERE notice_id NOT IN (SELECT id FROM notices)")[0]["n"] == 0
+    # The team's other device is locked out, and the GP no longer sees the link.
+    with pytest.raises(RelayError) as e:
+        Relay(relay_url, b_token).call("GET", "/v1/lp/links")
+    assert e.value.status == 401
+    assert g.links() == []
+
+
+def test_gp_deletes_own_account(relay_url, tmp_path, monkeypatch):
+    from drawbook.relay.gp import main as gp_main
+    gp_home = tmp_path / "gp"
+    monkeypatch.setenv("DRAWBOOK_GP_HOME", str(gp_home))
+    s = GPClient.signup(relay_url, "Exit Partners", "ir@exitpartners.example", "exitpartners.example")
+    g = GPClient.verify(relay_url, s["signup_id"], s["dev_code"], conduit_consent=True)  # saved to gp.json
+    gp_id = g.state["gp_id"]
+    fund = g.add_fund("Exit Fund I", {"vintage": "2020"}, conduit_consent=True)
+    use_home(monkeypatch, tmp_path / "lp")
+    lp.init(relay_url, "Staying LP")
+    link = g.accept_invite(lp.invite("Exit Fund I")["code"], fund)
+    pdf = tmp_path / "n.pdf"
+    pdf.write_bytes(b"%PDF-1.4 waiting notice")
+    g.send(link, [pdf])
+    assert "Exit Partners" in json.dumps(Relay(relay_url, "test-admin").call("GET", "/v1/admin/conduit-export"))
+
+    with pytest.raises(RelayError) as e:
+        g.relay.call("DELETE", "/v1/gp/me", {"confirm": "wrong"})
+    assert e.value.status == 400
+    monkeypatch.setattr("builtins.input", lambda _: "yes")
+    assert gp_main(["delete"]) == 1 and (gp_home / "gp.json").exists()
+
+    monkeypatch.setattr("builtins.input", lambda _: "delete")
+    assert gp_main(["delete"]) == 0
+    assert not (gp_home / "gp.json").exists()
+    for t, col in [("gp_firms", "id"), ("gp_funds", "gp_id"), ("links", "gp_id")]:
+        assert sql(f"SELECT COUNT(*) AS n FROM {t} WHERE {col} = '{gp_id}'")[0]["n"] == 0
+    assert sql(f"SELECT COUNT(*) AS n FROM notices WHERE link_id = '{link}'")[0]["n"] == 0
+    assert sql("SELECT COUNT(*) AS n FROM blob_chunks WHERE notice_id NOT IN (SELECT id FROM notices)")[0]["n"] == 0
+    # The old API key no longer works, the firm leaves the Conduit export, and the investor keeps its account.
+    with pytest.raises(RelayError) as e:
+        g.relay.call("GET", "/v1/gp/me")
+    assert e.value.status == 401
+    assert "Exit Partners" not in json.dumps(Relay(relay_url, "test-admin").call("GET", "/v1/admin/conduit-export"))
+    assert lp.links() == []

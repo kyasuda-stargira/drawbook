@@ -40,6 +40,8 @@ drawbook-gp accept <invite code> --fund-id <fund_id> --lp-ref "your own investor
 drawbook-gp send <link_id> notice.pdf ilpa-template.xlsx --kind capital_call
 ```
 
+`drawbook-gp delete` deletes your firm on the relay, with its funds, investor links and notices not yet fetched, and removes `gp.json` from your computer. It asks you to type `delete` first.
+
 `drawbook-gp funds` shows, for each of your funds, how many investors are linked and how many have said they want that fund's notices through Drawbook ("fewer than 3" below three, so no single investor stands out).
 
 Kinds: `capital_call`, `distribution`, `combined`, `capital_account_statement`, `other`. You may send the PDF, ILPA's 2025 Capital Call & Distribution Template (.xlsx), and/or a `<name>.drawbook.json` file holding the notice in Drawbook's own schema (`drawbook.schema.Notice`). Structured files are read exactly, with no AI reading.
@@ -60,6 +62,7 @@ Every call uses JSON over HTTPS. After sign-up, send `Authorization: Bearer <api
 | `POST /v1/gp/signup` | firm_name, email, website | signup_id (code is emailed) |
 | `POST /v1/gp/verify` | signup_id, code, sign_pk, profile, conduit_consent | gp_id, api_key |
 | `GET /v1/gp/me`, `PATCH /v1/gp/me` | profile, conduit_consent | firm record |
+| `DELETE /v1/gp/me` | confirm (your gp_id) | deletes the firm, funds, links and waiting notices |
 | `POST /v1/gp/keys` | sign_pk | new api_key (investors must re-confirm the fingerprint) |
 | `GET /v1/gp/funds`, `POST /v1/gp/funds`, `PUT /v1/gp/funds/{id}` | name, profile, conduit_consent | fund_id |
 | `GET /v1/gp/demand` | | per fund: investors_asking, investors_linked |
@@ -80,6 +83,6 @@ Every call uses JSON over HTTPS. After sign-up, send `Authorization: Bearer <api
    - `x-drawbook-kind: <kind>`
    - `x-drawbook-keys: base64(JSON {member_id: sealed_key})`
 
-You must seal to every current member. If the investor's devices changed, the relay answers 409; fetch `/v1/gp/links` again. The size limit is 25 MB per notice. The relay deletes the encrypted file once every device has fetched it, and after 90 days in any case.
+You must seal to every current member. If the investor's devices changed, the relay answers 409; fetch `/v1/gp/links` again. The size limit is 25 MB per notice. The relay deletes the encrypted file once every device has fetched it, and after 90 days in any case. A GP or investor account that makes no request for 24 months is deleted, with its funds, links and waiting notices.
 
 The reference code is `src/drawbook/relay/gp.py` and `crypto.py` (Apache 2.0).

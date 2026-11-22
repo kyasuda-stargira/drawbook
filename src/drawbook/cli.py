@@ -153,6 +153,7 @@ def cmd_connect(argv: list[str]) -> int:
     s.add_argument("--label", default="team device"); s.add_argument("--grant")
     s = sub.add_parser("approve", help="team: on an EXISTING device, approve a join request")
     s.add_argument("request")
+    sub.add_parser("delete", help="delete your account on the relay, with all devices, links and waiting notices")
     a = ap.parse_args(argv)
     if a.cmd == "init":
         out = lp.init(a.relay, a.label, a.device)
@@ -181,6 +182,14 @@ def cmd_connect(argv: list[str]) -> int:
             print("On a device already connected, run:\n  drawbook connect approve " + lp.join_request(a.label))
     elif a.cmd == "approve":
         print("On the new device, run:\n  drawbook connect join --grant " + lp.approve(a.request))
+    elif a.cmd == "delete":
+        print("This deletes your account on the relay for every device in your team: all links to your GPs, "
+              "invites, 'I hold this fund' entries and notices not yet fetched. It cannot be undone. "
+              "Documents already on your computer are kept.")
+        if input("Type delete to confirm: ").strip() != "delete":
+            print("Nothing deleted.")
+            return 1
+        print(f"Account {lp.delete_account()} deleted. Your GPs can no longer send you notices through Drawbook.")
     return 0
 
 

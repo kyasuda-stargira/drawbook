@@ -12,6 +12,9 @@ const KEEP_DAYS = 90; // ciphertext is deleted once every member has fetched it,
 const FREE_MAIL = new Set(["gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "yahoo.com",
   "icloud.com", "me.com", "mac.com", "aol.com", "proton.me", "protonmail.com", "gmx.com", "gmx.de", "web.de", "qq.com"]);
 const DEMAND_FLOOR = 3; // demand counts below this are shown as "fewer than 3"
+const cutoff30 = () => new Date(Date.now() - 30 * 86400e3).toISOString(); // invites kept 30 days after use or expiry
+const IDLE_DAYS = 730; // accounts with no activity for 24 months are deleted
+const ago = (days) => new Date(Date.now() - days * 86400e3).toISOString();
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -86,6 +89,7 @@ async function lpMember(req, env) {
   if (!t.startsWith("dbl_")) throw new HttpError(401, "not an LP token");
   const m = await env.DB.prepare("SELECT * FROM lp_members WHERE token_hash = ? AND revoked_at IS NULL").bind(await sha256(t)).first();
   if (!m) throw new HttpError(401, "unknown LP token");
+  await seen(env, "lp_accounts", m.account_id);
   return m;
 }
 async function gpFirm(req, env) {
@@ -93,7 +97,13 @@ async function gpFirm(req, env) {
   if (!t.startsWith("dbg_")) throw new HttpError(401, "not a GP key");
   const g = await env.DB.prepare("SELECT * FROM gp_firms WHERE key_hash = ?").bind(await sha256(t)).first();
   if (!g) throw new HttpError(401, "unknown GP key");
+  await seen(env, "gp_firms", g.id);
   return g;
+}
+// Record activity at most once a day per account, so most requests add no write.
+async function seen(env, table, id) {
+  await env.DB.prepare(`UPDATE ${table} SET last_seen_at = ? WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at < ?)`)
+    .bind(now(), id, ago(1)).run();
 }
 async function limit(env, bucket, max, windowMs) {
   const row = await env.DB.prepare("SELECT n, reset_at FROM rate WHERE bucket = ?").bind(bucket).first();
@@ -128,7 +138,7 @@ async function lpRegister(req, env) {
   await limit(env, "lpreg:" + (req.headers.get("cf-connecting-ip") || "local"), 20, 3600e3);
   const account = randomId("lpa_"), member = randomId("lpm_"), token = randomToken("dbl_");
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO lp_accounts (id, label, created_at) VALUES (?, ?, ?)").bind(account, str(b.label, "label", 120), now()),
+    env.DB.prepare("INSERT INTO lp_accounts (id, label, created_at, last_seen_at) VALUES (?, ?, ?, ?)").bind(account, str(b.label, "label", 120), now(), now()),
     env.DB.prepare("INSERT INTO lp_members (id, account_id, label, box_pk, sign_pk, token_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .bind(member, account, str(b.member_label || "first device", "member_label", 120), key32(b.box_pk, "box_pk"),
         key32(b.sign_pk, "sign_pk"), await sha256(token), now()),
@@ -159,6 +169,15 @@ async function lpRevokeMember(req, env, id) {
   return json({ ok: true });
 }
 
+// The investor deletes its own account and everything attached. The body must repeat the account id.
+async function lpDeleteAccount(req, env) {
+  const m = await lpMember(req, env);
+  const b = await body(req);
+  if (b.confirm !== m.account_id) throw new HttpError(400, "confirm must be your account id");
+  await deleteLpAccount(env, m.account_id);
+  return json({ ok: true, deleted: m.account_id });
+}
+
 async function lpInvite(req, env) {
   const m = await lpMember(req, env);
   const b = await body(req);
@@ -166,7 +185,7 @@ async function lpInvite(req, env) {
   const code = randomToken("inv_");
   const fund = str(b.fund_name, "fund_name", 200);
   await env.DB.prepare("INSERT INTO invites (code_hash, account_id, fund_name, lp_label, gp_email, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(await sha256(code), m.account_id, fund, str(b.lp_label, "lp_label", 120), str(b.gp_email, "gp_email", 320, false),
+    .bind(await sha256(code), m.account_id, fund, str(b.lp_label, "lp_label", 120), null, // the GP's email is never stored
       later(INVITE_DAYS * 86400e3), now()).run();
   return json({ code, url: `${env.PUBLIC_BASE}#invite=${encodeURIComponent(code)}`, expires_in_days: INVITE_DAYS }, 201);
 }
@@ -244,6 +263,36 @@ async function dropNotice(env, id) {
   await env.DB.prepare("UPDATE notices SET deleted_at = ? WHERE id = ?").bind(now(), id).run();
 }
 
+// Delete links and everything sent over them (used when an account is deleted).
+async function dropLinks(env, where, id) {
+  const links = await env.DB.prepare(`SELECT id FROM links WHERE ${where} = ?`).bind(id).all();
+  for (const l of links.results) {
+    const ns = await env.DB.prepare("SELECT id FROM notices WHERE link_id = ?").bind(l.id).all();
+    for (const n of ns.results) {
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM blob_chunks WHERE notice_id = ?").bind(n.id),
+        env.DB.prepare("DELETE FROM notice_keys WHERE notice_id = ?").bind(n.id),
+        env.DB.prepare("DELETE FROM notices WHERE id = ?").bind(n.id),
+      ]);
+    }
+    await env.DB.prepare("DELETE FROM invites WHERE link_id = ?").bind(l.id).run();
+    await env.DB.prepare("DELETE FROM links WHERE id = ?").bind(l.id).run();
+  }
+}
+async function deleteLpAccount(env, id) {
+  await dropLinks(env, "account_id", id);
+  await env.DB.batch(["invites", "lp_holdings", "lp_members"].map((t) =>
+    env.DB.prepare(`DELETE FROM ${t} WHERE account_id = ?`).bind(id)).concat(
+    env.DB.prepare("DELETE FROM lp_accounts WHERE id = ?").bind(id)));
+}
+async function deleteGpFirm(env, id) {
+  await dropLinks(env, "gp_id", id);
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM gp_funds WHERE gp_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM gp_firms WHERE id = ?").bind(id),
+  ]);
+}
+
 // ---------------- GP routes ----------------
 
 async function gpSignup(req, env) {
@@ -269,9 +318,9 @@ async function gpVerify(req, env) {
   const profile = b.profile && typeof b.profile === "object" ? b.profile : {};
   await env.DB.batch([
     env.DB.prepare("UPDATE gp_signups SET used_at = ? WHERE id = ?").bind(now(), s.id),
-    env.DB.prepare("INSERT INTO gp_firms (id, firm_name, email, website, sign_pk, key_hash, conduit_consent, profile_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    env.DB.prepare("INSERT INTO gp_firms (id, firm_name, email, website, sign_pk, key_hash, conduit_consent, profile_json, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .bind(gp, s.firm_name, s.email, s.website, key32(b.sign_pk, "sign_pk"), await sha256(key), b.conduit_consent ? 1 : 0,
-        JSON.stringify(cleanProfile(profile, FIRM_FIELDS)), now()),
+        JSON.stringify(cleanProfile(profile, FIRM_FIELDS)), now(), now()),
   ]);
   return json({ gp_id: gp, api_key: key }, 201);
 }
@@ -296,6 +345,15 @@ async function gpMe(req, env) {
   const g = await gpFirm(req, env);
   return json({ gp_id: g.id, firm_name: g.firm_name, website: g.website, conduit_consent: !!g.conduit_consent,
     profile: JSON.parse(g.profile_json), sign_pk: g.sign_pk });
+}
+
+// The GP deletes its own firm and everything attached. The body must repeat the GP id.
+async function gpDeleteAccount(req, env) {
+  const g = await gpFirm(req, env);
+  const b = await body(req);
+  if (b.confirm !== g.id) throw new HttpError(400, "confirm must be your gp id");
+  await deleteGpFirm(env, g.id);
+  return json({ ok: true, deleted: g.id });
 }
 
 async function gpUpdate(req, env) {
@@ -455,6 +513,7 @@ const ROUTES = [
   ["GET", /^\/v1\/lp\/members$/, lpListMembers],
   ["POST", /^\/v1\/lp\/members$/, lpAddMember],
   ["DELETE", /^\/v1\/lp\/members\/([\w-]+)$/, lpRevokeMember],
+  ["DELETE", /^\/v1\/lp\/account$/, lpDeleteAccount],
   ["POST", /^\/v1\/lp\/invites$/, lpInvite],
   ["GET", /^\/v1\/lp\/links$/, lpLinks],
   ["DELETE", /^\/v1\/lp\/links\/([\w-]+)$/, lpCloseLink],
@@ -467,6 +526,7 @@ const ROUTES = [
   ["POST", /^\/v1\/gp\/verify$/, gpVerify],
   ["GET", /^\/v1\/gp\/me$/, gpMe],
   ["PATCH", /^\/v1\/gp\/me$/, gpUpdate],
+  ["DELETE", /^\/v1\/gp\/me$/, gpDeleteAccount],
   ["POST", /^\/v1\/gp\/keys$/, gpRotateKey],
   ["GET", /^\/v1\/gp\/funds$/, gpFunds],
   ["POST", /^\/v1\/gp\/funds$/, (r, e) => gpAddFund(r, e, null)],
@@ -495,12 +555,18 @@ export default {
     }
     return json({ error: "not found" }, 404);
   },
-  // Daily: drop ciphertext older than KEEP_DAYS, expired sign-ups and rate buckets.
+  // Daily: drop ciphertext older than KEEP_DAYS, expired sign-ups, old invites, rate buckets and accounts idle IDLE_DAYS.
   async scheduled(_event, env) {
     const cutoff = new Date(Date.now() - KEEP_DAYS * 86400e3).toISOString();
     const old = await env.DB.prepare("SELECT id FROM notices WHERE deleted_at IS NULL AND created_at < ?").bind(cutoff).all();
     for (const n of old.results) await dropNotice(env, n.id);
     await env.DB.prepare("DELETE FROM gp_signups WHERE expires_at < ?").bind(now()).run();
+    await env.DB.prepare("DELETE FROM invites WHERE expires_at < ? OR used_at < ?").bind(cutoff30(), cutoff30()).run();
     await env.DB.prepare("DELETE FROM rate WHERE reset_at < ?").bind(now()).run();
+    const idle = ago(IDLE_DAYS);
+    const lps = await env.DB.prepare("SELECT id FROM lp_accounts WHERE COALESCE(last_seen_at, created_at) < ?").bind(idle).all();
+    for (const a of lps.results) await deleteLpAccount(env, a.id);
+    const gps = await env.DB.prepare("SELECT id FROM gp_firms WHERE COALESCE(last_seen_at, created_at) < ?").bind(idle).all();
+    for (const g of gps.results) await deleteGpFirm(env, g.id);
   },
 };
